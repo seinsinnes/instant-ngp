@@ -22,6 +22,7 @@ endif()
 option(NGP_BUILD_WITH_GUI "Build with GUI support (requires GLFW and GLEW)?" ON)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+set(CMAKE_VERBOSE_MAKEFILE ON)
 
 ###############################################################################
 # Build type and C++ compiler setup
@@ -50,7 +51,7 @@ if (MSVC)
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /D_CRT_SECURE_NO_WARNINGS")
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP24")
 else()
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -march=native")
 endif()
 
 set(CMAKE_CXX_STANDARD 14)
@@ -68,7 +69,7 @@ set(CUDA_LINK_LIBRARIES_KEYWORD PUBLIC)
 if (MSVC)
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-bigobj")
 else()
-	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-mf16c")
+	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-march=native")
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-Wno-float-conversion")
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-fno-strict-aliasing")
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-fPIC")
