@@ -9,7 +9,7 @@ In each case, we train and render a MLP with multiresolution hash input encoding
 
 > __Instant Neural Graphics Primitives with a Multiresolution Hash Encoding__  
 > [Thomas Müller](https://tom94.net), [Alex Evans](https://research.nvidia.com/person/alex-evans), [Christoph Schied](https://research.nvidia.com/person/christoph-schied), [Alexander Keller](https://research.nvidia.com/person/alex-keller)  
-> _[arXiv:2201.05989 [cs.CV]](https://arxiv.org/abs/2201.05989), Jan 2022_  
+> _ACM Transactions on Graphics (__SIGGRAPH__), July 2022_  
 > __[Project page](https://nvlabs.github.io/instant-ngp)&nbsp;/ [Paper](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf)&nbsp;/ [Video](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.mp4)&nbsp;/ [BibTeX](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.bib)__
 
 For business inquiries, please visit our website and submit the form: [NVIDIA Research Licensing](https://www.nvidia.com/en-us/research/inquiries/)
@@ -24,19 +24,31 @@ For business inquiries, please visit our website and submit the form: [NVIDIA Re
 - __[CUDA](https://developer.nvidia.com/cuda-toolkit) v10.2 or higher__ and __[CMake](https://cmake.org/) v3.21 or higher__.
 - __(optional) [Python](https://www.python.org/) 3.7 or higher__ for interactive bindings. Also, run `pip install -r requirements.txt`.
 - __(optional) [OptiX](https://developer.nvidia.com/optix) 7.3 or higher__ for faster mesh SDF training. Set the environment variable `OptiX_INSTALL_DIR` to the installation directory if it is not discovered automatically.
+- __(optional) [Vulkan SDK](https://vulkan.lunarg.com/)__ for DLSS support.
 
 
-If you are using Linux, install the following packages
+If you are using Debian based Linux distribution, install the following packages
 ```sh
 sudo apt-get install build-essential git python3-dev python3-pip libopenexr-dev libxi-dev \
                      libglfw3-dev libglew-dev libomp-dev libxinerama-dev libxcursor-dev
 ```
 
+Alternatively, if you are using Arch or Arch derivatives, install the following packages
+```sh
+sudo pacman -S base-devel cmake openexr libxi glfw openmp libxinerama libxcursor
+```
+
 We also recommend installing [CUDA](https://developer.nvidia.com/cuda-toolkit) and [OptiX](https://developer.nvidia.com/optix) in `/usr/local/` and adding the CUDA installation to your PATH.
+
 For example, if you have CUDA 11.4, add the following to your `~/.bashrc`
 ```sh
 export PATH="/usr/local/cuda-11.4/bin:$PATH"
 export LD_LIBRARY_PATH="/usr/local/cuda-11.4/lib64:$LD_LIBRARY_PATH"
+```
+
+For Arch and derivatives,
+```sh
+sudo pacman -S cuda
 ```
 
 
@@ -51,7 +63,7 @@ $ cd instant-ngp
 Then, use CMake to build the project: (on Windows, this must be in a [developer command prompt](https://docs.microsoft.com/en-us/cpp/build/building-on-the-command-line?view=msvc-160#developer_command_prompt))
 ```sh
 instant-ngp$ cmake . -B build
-instant-ngp$ cmake --build build --config RelWithDebInfo -j 16
+instant-ngp$ cmake --build build --config RelWithDebInfo -j
 ```
 
 If the build fails, please consult [this list of possible fixes](https://github.com/NVlabs/instant-ngp#troubleshooting-compile-errors) before opening an issue.
@@ -61,7 +73,7 @@ If the build succeeds, you can now run the code via the `build/testbed` executab
 If automatic GPU architecture detection fails, (as can happen if you have multiple GPUs installed), set the `TCNN_CUDA_ARCHITECTURES` enivonment variable for the GPU you would like to use. The following table lists the values for common GPUs. If your GPU is not listed, consult [this exhaustive list](https://developer.nvidia.com/cuda-gpus).
 
 | RTX 30X0 | A100 | RTX 20X0 | TITAN V / V100 | GTX 10X0 / TITAN Xp | GTX 9X0 | K80 |
-|----------|------|----------|----------------|---------------------|---------|-----|
+|:--------:|:----:|:--------:|:--------------:|:-------------------:|:-------:|:---:|
 |       86 |   80 |       75 |             70 |                  61 |      52 |  37 |
 
 
@@ -78,7 +90,7 @@ This codebase comes with an interactive testbed that includes many features beyo
 - And many more task-specific settings.
 - See also our [one minute demonstration video of the tool](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.mp4).
 
-
+Let's start using the testbed; more information about the GUI and other scripts follow these test scenes.
 
 ### NeRF fox
 
@@ -88,16 +100,22 @@ One test scene is provided in this repository, using a small number of frames fr
 instant-ngp$ ./build/testbed --scene data/nerf/fox
 ```
 
+On Windows you need to reverse the slashes here (and below), i.e.:
+
+```sh
+instant-ngp> .\build\testbed --scene data\nerf\fox
+```
+
 <img src="docs/assets_readme/fox.png"/>
 
-Alternatively, download any NeRF-compatible scene (e.g. [from the NeRF authors' drive](https://drive.google.com/drive/folders/1JDdLGDruGNXWnM1eqY1FNL9PlStjaKWi)).
+Alternatively, download any NeRF-compatible scene (e.g. from the [NeRF authors' drive](https://drive.google.com/drive/folders/1JDdLGDruGNXWnM1eqY1FNL9PlStjaKWi), the [SILVR dataset](https://github.com/IDLabMedia/large-lightfields-dataset), or the [DroneDeploy dataset](https://github.com/nickponline/dd-nerf-dataset)).
 Now you can run:
 
 ```sh
 instant-ngp$ ./build/testbed --scene data/nerf_synthetic/lego/transforms_train.json
 ```
 
-For more information about preparing datasets for use with our NeRF implementation, please see [this document](docs/nerf_dataset_tips.md).
+**[To prepare your own dataset for use with our NeRF implementation, click here.](docs/nerf_dataset_tips.md)**
 
 ### SDF armadillo
 
@@ -132,10 +150,47 @@ instant-ngp$ ./build/testbed --mode volume --scene data/volume/wdas_cloud_quarte
 <img src="docs/assets_readme/cloud.png"/>
 
 
+### Testbed controls
+
+Here are the main keyboard controls for the testbed application.
+
+| Key             | Meaning       |
+| :-------------: | ------------- |
+| WASD            | Forward / pan left / backward / pan right. |
+| Spacebar / C    | Move up / down. |
+| = or + / - or _ | Increase / decrease camera velocity. |
+| E / Shift+E     | Increase / decrease exposure. |
+| T               | Toggle training. After around two minutes training tends to settle down, so can be toggled off. |
+| R               | Reload network from file. |
+| Shift+R         | Reset camera. |
+| O               | Toggle visualization or accumulated error map. |
+| G               | Toggle visualization of the ground truth. |
+| M               | Toggle multi-view visualization of layers of the neural model. See the paper's video for a little more explanation. |
+| , / .           | Shows the previous / next visualized layer; hit M to escape. |
+| 1-8             | Switches among various render modes, with 2 being the standard one. You can see the list of render mode names in the control interface. |
+
+There are many controls in the __instant-ngp__ GUI when the testbed program is run.
+First, note that this GUI can be moved and resized, as can the "Camera path" GUI (which first must be expanded to be used).
+
+Some popular user controls in __instant-ngp__ are:
+
+* __Snapshot:__ use Save to save the NeRF solution generated, Load to reload. Necessary if you want to make an animation.
+* __Rendering -> DLSS:__ toggling this on and setting "DLSS sharpening" below it to 1.0 can often improve rendering quality.
+* __Rendering -> Crop size:__ trim back the surrounding environment to focus on the model. "Crop aabb" lets you move the center of the volume of interest and fine tune. See more about this feature in [our NeRF training & dataset tips](https://github.com/NVlabs/instant-ngp/blob/master/docs/nerf_dataset_tips.md).
+
+The "Camera path" GUI lets you set frames along a path. "Add from cam" is the main button you'll want to push, then saving out the camera keyframes using "Save" to create a `base_cam.json` file. There is a bit more information about the GUI [in this post](https://developer.nvidia.com/blog/getting-started-with-nvidia-instant-nerfs/) and [in this (bit dated) video](https://www.youtube.com/watch?v=z3-fjYzd0BA).
+
+
 ## Python bindings
 
 To conduct controlled experiments in an automated fashion, all features from the interactive testbed (and more!) have Python bindings that can be easily instrumented.
 For an example of how the `./build/testbed` application can be implemented and extended from within Python, see `./scripts/run.py`, which supports a superset of the command line arguments that `./build/testbed` does.
+
+Here is a typical command line using `scripts/run.py` to generate a 5-second flythrough of the fox dataset to the (default) file `movie.mp4`, after using the testbed to save a (default) NeRF snapshot `base.msgpack` and a set of camera key frames:
+
+```sh
+instant-ngp$ python scripts/run.py --mode nerf --scene data/nerf/fox --load_snapshot data/nerf/fox/base.msgpack --video_camera_path data/nerf/fox/base_cam.json --video_n_seconds 5 --video_fps 60 --width 1920 --height 1080
+```
 
 If you'd rather build new models from the hash encoding and fast neural networks, consider the [__tiny-cuda-nn__'s PyTorch extension](https://github.com/nvlabs/tiny-cuda-nn#pytorch-extension).
 
@@ -194,7 +249,7 @@ __Q:__ The NeRF reconstruction of my custom dataset looks bad; what can I do?
 __A:__ There could be multiple issues:
 - COLMAP might have been unable to reconstruct camera poses.
 - There might have been movement or blur during capture. Don't treat capture as an artistic task; treat it as photogrammetry. You want _\*as little blur as possible\*_ in your dataset (motion, defocus, or otherwise) and all objects must be _\*static\*_ during the entire capture. Bonus points if you are using a wide-angle lens (iPhone wide angle works well), because it covers more space than narrow lenses.
-- The dataset parameters (in particular `aabb_scale`) might have been tuned suboptimally. We recommend starting with `aabb_scale=16` and then decreasing it to `8`, `4`, `2`, and `1` until you get optimal quality.
+- The dataset parameters (in particular `aabb_scale`) might have been tuned suboptimally. We recommend starting with `aabb_scale=16` and then increasing or decreasing it by factors of two until you get optimal quality.
 - Carefully read [our NeRF training & dataset tips](https://github.com/NVlabs/instant-ngp/blob/master/docs/nerf_dataset_tips.md).
 
 ##
@@ -253,11 +308,21 @@ Many thanks to the authors of these brilliant projects!
 
 ```bibtex
 @article{mueller2022instant,
-    title = {Instant Neural Graphics Primitives with a Multiresolution Hash Encoding},
     author = {Thomas M\"uller and Alex Evans and Christoph Schied and Alexander Keller},
-    journal = {arXiv:2201.05989},
+    title = {Instant Neural Graphics Primitives with a Multiresolution Hash Encoding},
+    journal = {ACM Trans. Graph.},
+    issue_date = {July 2022},
+    volume = {41},
+    number = {4},
+    month = jul,
     year = {2022},
-    month = jan
+    pages = {102:1--102:15},
+    articleno = {102},
+    numpages = {15},
+    url = {https://doi.org/10.1145/3528223.3530127},
+    doi = {10.1145/3528223.3530127},
+    publisher = {ACM},
+    address = {New York, NY, USA},
 }
 ```
 

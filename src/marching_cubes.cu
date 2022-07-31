@@ -12,9 +12,9 @@
  *  @author Alex Evans, NVIDIA
  */
 
-#include <neural-graphics-primitives/common.h>
-#include <neural-graphics-primitives/common_device.cuh>
 #include <neural-graphics-primitives/bounding_box.cuh>
+#include <neural-graphics-primitives/common_device.cuh>
+#include <neural-graphics-primitives/common.h>
 #include <neural-graphics-primitives/random_val.cuh> // helpers to generate random values, directions
 #include <neural-graphics-primitives/thread_pool.h>
 
@@ -22,6 +22,7 @@
 #include <filesystem/path.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+
 #include <stb_image/stb_image_write.h>
 #include <stdarg.h>
 
@@ -53,7 +54,28 @@ Vector3i get_marching_cubes_res(uint32_t res_1d, const BoundingBox &aabb) {
 }
 
 #ifdef NGP_GUI
-static bool check_shader(GLuint handle, const char* desc, bool program) {
+void glCheckError(const char* file, unsigned int line) {
+	GLenum errorCode = glGetError();
+	while (errorCode != GL_NO_ERROR) {
+		std::string fileString(file);
+		std::string error = "unknown error";
+		// clang-format off
+		switch (errorCode) {
+			case GL_INVALID_ENUM:      error = "GL_INVALID_ENUM"; break;
+			case GL_INVALID_VALUE:     error = "GL_INVALID_VALUE"; break;
+			case GL_INVALID_OPERATION: error = "GL_INVALID_OPERATION"; break;
+			case GL_STACK_OVERFLOW:    error = "GL_STACK_OVERFLOW"; break;
+			case GL_STACK_UNDERFLOW:   error = "GL_STACK_UNDERFLOW"; break;
+			case GL_OUT_OF_MEMORY:     error = "GL_OUT_OF_MEMORY"; break;
+		}
+		// clang-format on
+
+		tlog::error() << "OpenglError : file=" << file << " line=" << line << " error:" << error;
+		errorCode = glGetError();
+	}
+}
+
+bool check_shader(uint32_t handle, const char* desc, bool program) {
 	GLint status = 0, log_length = 0;
 	if (program) {
 		glGetProgramiv(handle, GL_LINK_STATUS, &status);
@@ -78,9 +100,9 @@ static bool check_shader(GLuint handle, const char* desc, bool program) {
 	return (GLboolean)status == GL_TRUE;
 }
 
-static GLuint compile_shader(bool pixel, const char* code) {
+uint32_t compile_shader(bool pixel, const char* code) {
 	GLuint g_VertHandle = glCreateShader(pixel ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER );
-	const char* glsl_version = "#version 330";
+	const char* glsl_version = "#version 330\n";
 	const GLchar* strings[2] = { glsl_version, code};
 	glShaderSource(g_VertHandle, 2, strings, NULL);
 	glCompileShader(g_VertHandle);
@@ -105,6 +127,7 @@ void draw_mesh_gl(
 	if (verts.size() == 0 || indices.size() == 0 || mesh_render_mode == 0) {
 		return;
 	}
+
 	static GLuint vs = 0, ps = 0, program = 0, VAO = 0, VBO[3] = {}, els = 0, vbosize = 0, elssize = 0;
 	if (!VAO) {
 		glGenVertexArrays(1, &VAO);
@@ -169,6 +192,7 @@ void main()
 	p.xy *= vec2(2.0, -2.0) * f.xy / vec2(res.xy);
 	p.w = p.z;
 	p.z = p.z - 0.1;
+	p.xy += cen * p.w;
 	if (mode == 2) {
 		vtxcol = normalize(nor) * 0.5 + vec3(0.5); // visualize vertex normals
 	} else {
@@ -206,7 +230,7 @@ void main() {
 	glUseProgram(program);
 	glUniformMatrix4fv(glGetUniformLocation(program, "camera"), 1, GL_FALSE, (GLfloat*)&world2view);
 	glUniform2f(glGetUniformLocation(program, "f"), focal_length.x(), focal_length.y());
-	glUniform2f(glGetUniformLocation(program, "cen"), screen_center.x(), screen_center.y());
+	glUniform2f(glGetUniformLocation(program, "cen"), screen_center.x()*2.f-1.f, screen_center.y()*-2.f+1.f);
 	glUniform2i(glGetUniformLocation(program, "res"), resolution.x(), resolution.y());
 	glUniform1i(glGetUniformLocation(program, "mode"), mesh_render_mode);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, els);
@@ -247,13 +271,13 @@ with z=1
 
 edges 8-11 go in +z direction from vertex 0-3
 */
-__global__ void gen_vertices(BoundingBox aabb, Vector3i res_3d, const float* __restrict__ density, int*__restrict__ vertidx_grid, Vector3f* verts_out, float thresh, uint32_t* __restrict__ counters) {
+__global__ void gen_vertices(BoundingBox render_aabb, Matrix3f render_aabb_to_local, Vector3i res_3d, const float* __restrict__ density, int*__restrict__ vertidx_grid, Vector3f* verts_out, float thresh, uint32_t* __restrict__ counters) {
 	uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
 	uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
 	uint32_t z = blockIdx.z * blockDim.z + threadIdx.z;
 	if (x>=res_3d.x() || y>=res_3d.y() || z>=res_3d.z()) return;
-	Vector3f scale=(aabb.max-aabb.min).cwiseQuotient(res_3d.cast<float>());
-	Vector3f offset=aabb.min;
+	Vector3f scale=(render_aabb.max-render_aabb.min).cwiseQuotient((res_3d-Vector3i::Ones()).cast<float>());
+	Vector3f offset=render_aabb.min;
 	uint32_t res2=res_3d.x()*res_3d.y();
 	uint32_t res3=res_3d.x()*res_3d.y()*res_3d.z();
 	uint32_t idx=x+y*res_3d.x()+z*res2;
@@ -267,7 +291,7 @@ __global__ void gen_vertices(BoundingBox aabb, Vector3i res_3d, const float* __r
 				vertidx_grid[idx]=vidx+1;
 				float prevf=f0,nextf=f1;
 				float dt=((thresh-prevf)/(nextf-prevf));
-				verts_out[vidx]=Vector3f{float(x)+dt, float(y), float(z)}.cwiseProduct(scale) + offset;
+				verts_out[vidx]=render_aabb_to_local.transpose() * (Vector3f{float(x)+dt, float(y), float(z)}.cwiseProduct(scale) + offset);
 			}
 		}
 	}
@@ -279,7 +303,7 @@ __global__ void gen_vertices(BoundingBox aabb, Vector3i res_3d, const float* __r
 				vertidx_grid[idx+res3]=vidx+1;
 				float prevf=f0,nextf=f1;
 				float dt=((thresh-prevf)/(nextf-prevf));
-				verts_out[vidx]=Vector3f{float(x), float(y)+dt, float(z)}.cwiseProduct(scale) + offset;
+				verts_out[vidx]=render_aabb_to_local.transpose() * (Vector3f{float(x), float(y)+dt, float(z)}.cwiseProduct(scale) + offset);
 			}
 		}
 	}
@@ -291,7 +315,7 @@ __global__ void gen_vertices(BoundingBox aabb, Vector3i res_3d, const float* __r
 				vertidx_grid[idx+res3*2]=vidx+1;
 				float prevf=f0,nextf=f1;
 				float dt=((thresh-prevf)/(nextf-prevf));
-				verts_out[vidx]=Vector3f{float(x), float(y), float(z)+dt}.cwiseProduct(scale) + offset;
+				verts_out[vidx]=render_aabb_to_local.transpose() * (Vector3f{float(x), float(y), float(z)+dt}.cwiseProduct(scale) + offset);
 			}
 		}
 	}
@@ -760,7 +784,7 @@ void compute_mesh_opt_gradients(
 	);
 }
 
-void marching_cubes_gpu(cudaStream_t stream, BoundingBox aabb, Vector3i res_3d, float thresh, const tcnn::GPUMemory<float>& density, tcnn::GPUMemory<Vector3f>& verts_out, tcnn::GPUMemory<uint32_t>& indices_out) {
+void marching_cubes_gpu(cudaStream_t stream, BoundingBox render_aabb, Matrix3f render_aabb_to_local, Vector3i res_3d, float thresh, const tcnn::GPUMemory<float>& density, tcnn::GPUMemory<Vector3f>& verts_out, tcnn::GPUMemory<uint32_t>& indices_out) {
 	GPUMemory<uint32_t> counters;
 
 	counters.enlarge(4);
@@ -775,7 +799,7 @@ void marching_cubes_gpu(cudaStream_t stream, BoundingBox aabb, Vector3i res_3d, 
 	const dim3 threads = { 4, 4, 4 };
 	const dim3 blocks = { div_round_up((uint32_t)res_3d.x(), threads.x), div_round_up((uint32_t)res_3d.y(), threads.y), div_round_up((uint32_t)res_3d.z(), threads.z) };
 	// count only
-	gen_vertices<<<blocks, threads, 0>>>(aabb, res_3d, density.data(), nullptr, nullptr, thresh, counters.data());
+	gen_vertices<<<blocks, threads, 0>>>(render_aabb, render_aabb_to_local, res_3d, density.data(), nullptr, nullptr, thresh, counters.data());
 	gen_faces<<<blocks, threads, 0>>>(res_3d, density.data(), nullptr, nullptr, thresh, counters.data());
 	std::vector<uint32_t> cpucounters; cpucounters.resize(4);
 	counters.copy_to_host(cpucounters);
@@ -786,7 +810,7 @@ void marching_cubes_gpu(cudaStream_t stream, BoundingBox aabb, Vector3i res_3d, 
 	verts_out.memset(0);
 	indices_out.resize(cpucounters[1]);
 	// actually generate verts
-	gen_vertices<<<blocks, threads, 0>>>(aabb, res_3d, density.data(), vertex_grid, verts_out.data(), thresh, counters.data()+2);
+	gen_vertices<<<blocks, threads, 0>>>(render_aabb, render_aabb_to_local, res_3d, density.data(), vertex_grid, verts_out.data(), thresh, counters.data()+2);
 	gen_faces<<<blocks, threads, 0>>>(res_3d, density.data(), vertex_grid, indices_out.data(), thresh, counters.data()+2);
 }
 
@@ -928,43 +952,45 @@ void save_mesh(
 	fclose(f);
 }
 
-void save_density_grid_to_png(const GPUMemory<float>& density, const char* filename, Vector3i res3d, float thresh, bool swap_y_z) {
+void save_density_grid_to_png(const GPUMemory<float>& density, const char* filename, Vector3i res3d, float thresh, bool swap_y_z, float density_range) {
+	float density_scale = 128.f / density_range; // map from -density_range to density_range into 0-255
 	std::vector<float> density_cpu;
 	density_cpu.resize(density.size());
 	density.copy_to_host(density_cpu);
 	uint32_t num_voxels = 0;
 	uint32_t num_lattice_points_near_zero_crossing = 0;
+	uint32_t N = res3d.x()*res3d.y()*res3d.z();
 	for (int z = 1; z < res3d.z() - 1; ++z) {
 		for (int y = 1; y < res3d.y() - 1; ++y) {
-			for (int x = 1; x < res3d.z() - 1; ++x) {
+			for (int x = 1; x < res3d.x() - 1; ++x) {
 				int count = 0;
-				count += density_cpu[(x+0)+(y+0)*res3d.x()+(z+0)*res3d.x()*res3d.z()] < thresh;
-				count += density_cpu[(x+1)+(y+0)*res3d.x()+(z+0)*res3d.x()*res3d.z()] < thresh;
-				count += density_cpu[(x+0)+(y+1)*res3d.x()+(z+0)*res3d.x()*res3d.z()] < thresh;
-				count += density_cpu[(x+1)+(y+1)*res3d.x()+(z+0)*res3d.x()*res3d.z()] < thresh;
-				count += density_cpu[(x+0)+(y+0)*res3d.x()+(z+1)*res3d.x()*res3d.z()] < thresh;
-				count += density_cpu[(x+1)+(y+0)*res3d.x()+(z+1)*res3d.x()*res3d.z()] < thresh;
-				count += density_cpu[(x+0)+(y+1)*res3d.x()+(z+1)*res3d.x()*res3d.z()] < thresh;
-				count += density_cpu[(x+1)+(y+1)*res3d.x()+(z+1)*res3d.x()*res3d.z()] < thresh;
+				count += density_cpu[(x+0)+(y+0)*res3d.x()+(z+0)*res3d.x()*res3d.y()] < thresh;
+				count += density_cpu[(x+1)+(y+0)*res3d.x()+(z+0)*res3d.x()*res3d.y()] < thresh;
+				count += density_cpu[(x+0)+(y+1)*res3d.x()+(z+0)*res3d.x()*res3d.y()] < thresh;
+				count += density_cpu[(x+1)+(y+1)*res3d.x()+(z+0)*res3d.x()*res3d.y()] < thresh;
+				count += density_cpu[(x+0)+(y+0)*res3d.x()+(z+1)*res3d.x()*res3d.y()] < thresh;
+				count += density_cpu[(x+1)+(y+0)*res3d.x()+(z+1)*res3d.x()*res3d.y()] < thresh;
+				count += density_cpu[(x+0)+(y+1)*res3d.x()+(z+1)*res3d.x()*res3d.y()] < thresh;
+				count += density_cpu[(x+1)+(y+1)*res3d.x()+(z+1)*res3d.x()*res3d.y()] < thresh;
 				if (count>0 && count<8) {
 					num_voxels++;
 				}
 
-				bool mysign = density_cpu[(x+0)+(y+0)*res3d.x()+(z+0)*res3d.x()*res3d.z()] < thresh;
+				bool mysign = density_cpu[(x+0)+(y+0)*res3d.x()+(z+0)*res3d.x()*res3d.y()] < thresh;
 				bool near_zero_crossing=false;
-				near_zero_crossing |= (density_cpu[(x+1)+(y+0)*res3d.x()+(z+0)*res3d.x()*res3d.z()] < thresh) != mysign;
-				near_zero_crossing |= (density_cpu[(x-1)+(y+0)*res3d.x()+(z+0)*res3d.x()*res3d.z()] < thresh) != mysign;
-				near_zero_crossing |= (density_cpu[(x+0)+(y+1)*res3d.x()+(z+0)*res3d.x()*res3d.z()] < thresh) != mysign;
-				near_zero_crossing |= (density_cpu[(x+0)+(y-1)*res3d.x()+(z+0)*res3d.x()*res3d.z()] < thresh) != mysign;
-				near_zero_crossing |= (density_cpu[(x+0)+(y+0)*res3d.x()+(z+1)*res3d.x()*res3d.z()] < thresh) != mysign;
-				near_zero_crossing |= (density_cpu[(x+0)+(y+0)*res3d.x()+(z-1)*res3d.x()*res3d.z()] < thresh) != mysign;
+				near_zero_crossing |= (density_cpu[(x+1)+(y+0)*res3d.x()+(z+0)*res3d.x()*res3d.y()] < thresh) != mysign;
+				near_zero_crossing |= (density_cpu[(x-1)+(y+0)*res3d.x()+(z+0)*res3d.x()*res3d.y()] < thresh) != mysign;
+				near_zero_crossing |= (density_cpu[(x+0)+(y+1)*res3d.x()+(z+0)*res3d.x()*res3d.y()] < thresh) != mysign;
+				near_zero_crossing |= (density_cpu[(x+0)+(y-1)*res3d.x()+(z+0)*res3d.x()*res3d.y()] < thresh) != mysign;
+				near_zero_crossing |= (density_cpu[(x+0)+(y+0)*res3d.x()+(z+1)*res3d.x()*res3d.y()] < thresh) != mysign;
+				near_zero_crossing |= (density_cpu[(x+0)+(y+0)*res3d.x()+(z-1)*res3d.x()*res3d.y()] < thresh) != mysign;
 				if (near_zero_crossing) {
 					num_lattice_points_near_zero_crossing++;
 				}
 			}
 		}
 	}
-	uint32_t N = res3d.x()*res3d.y()*res3d.z();
+
 
 	if (swap_y_z) {
 		res3d = {res3d.x(), res3d.z(), res3d.y()};
@@ -983,15 +1009,16 @@ void save_density_grid_to_png(const GPUMemory<float>& density, const char* filen
 			int z = (u / res3d.x()) + (v / res3d.y()) * nacross;
 			if (z < res3d.z()) {
 				if (swap_y_z) {
-					*dst++ = (uint8_t)tcnn::clamp((density_cpu[x + z*res3d.x() + y*res3d.x()*res3d.z()]-thresh)*32.f + 128.5f, 0.f, 255.f);
+					*dst++ = (uint8_t)tcnn::clamp((density_cpu[x + z*res3d.x() + y*res3d.x()*res3d.z()]-thresh)*density_scale + 128.5f, 0.f, 255.f);
 				} else {
-					*dst++ = (uint8_t)tcnn::clamp((density_cpu[x + (res3d.y()-1-y)*res3d.x() + z*res3d.x()*res3d.y()]-thresh)*32.f + 128.5f, 0.f, 255.f);
+					*dst++ = (uint8_t)tcnn::clamp((density_cpu[x + (res3d.y()-1-y)*res3d.x() + z*res3d.x()*res3d.y()]-thresh)*density_scale + 128.5f, 0.f, 255.f);
 				}
 			} else {
 				*dst++ = 0;
 			}
 		}
 	}
+
 	stbi_write_png(filename, w, h, 1, pngpixels, w);
 
 	tlog::success() << "Wrote density PNG to " << filename;
@@ -1042,6 +1069,43 @@ void save_rgba_grid_to_png_sequence(const GPUMemory<Array4f>& rgba, const char* 
 		progress.update(++n_saved);
 	});
 	tlog::success() << "Wrote RGBA PNG sequence to " << path;
+}
+
+void save_rgba_grid_to_raw_file(const GPUMemory<Array4f>& rgba, const char* path, Vector3i res3d, bool swap_y_z, int cascade) {
+	std::vector<Array4f> rgba_cpu;
+	rgba_cpu.resize(rgba.size());
+	rgba.copy_to_host(rgba_cpu);
+
+	if (swap_y_z) {
+		res3d = {res3d.x(), res3d.z(), res3d.y()};
+	}
+
+	uint32_t w = res3d.x();
+	uint32_t h = res3d.y();
+	uint32_t d = res3d.z();
+	char filename[256];
+	snprintf(filename, sizeof(filename), "%s/%dx%dx%d_%d.bin", path, w, h, d, cascade);
+	FILE *f=fopen(filename,"wb");
+	if (!f)
+		return ;
+	const static float zero[4]={0.f,0.f,0.f,0.f};
+	int border = 1; // extra ring of voxels to make the donut hole smaller
+	for (int z = 0; z < d; ++z) {
+		for (int y = 0; y < h; ++y) {
+			for (int x = 0; x < w; ++x) {
+				size_t i = swap_y_z ? (x + z*res3d.x() + y*res3d.x()*res3d.z()) : (x + (res3d.y()-1-y)*res3d.x() + z*res3d.x()*res3d.y());
+				float* rgba = (float*)&rgba_cpu[i];
+				// the intention is that if cascade > 0, we have set up the render aabb such that we are outputing exactly one cascade of the nerf
+				// we then punch a transparent hole in the middle of each cascade, so that they fit together when placed on top of each other.
+				if (cascade && x>=res3d.x()/4+border && y>=res3d.y()/4+border && z>=res3d.z()/4+border && x<res3d.x()-res3d.x()/4-border && y<res3d.y()-res3d.y()/4-border && z<res3d.z()-res3d.z()/4-border)
+					fwrite(zero, sizeof(float), 4, f);
+				else
+					fwrite(rgba, sizeof(float), 4, f);
+			}
+		}
+	}
+	fclose(f);
+	tlog::success() << "Wrote RGBA raw file to " << filename;
 }
 
 NGP_NAMESPACE_END

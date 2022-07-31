@@ -6,9 +6,9 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-cmake_minimum_required(VERSION 3.19)
+cmake_minimum_required(VERSION 3.18)
 
-PROJECT(instant-ngp
+project(instant-ngp
 	VERSION 1.0
 	DESCRIPTION "Instant neural graphics primitives"
 	LANGUAGES C CXX CUDA
@@ -20,6 +20,8 @@ if (NOT NGP_DEPLOY)
 endif()
 
 option(NGP_BUILD_WITH_GUI "Build with GUI support (requires GLFW and GLEW)?" ON)
+option(NGP_BUILD_WITH_VULKAN "Build with Vulkan to enable DLSS support?" ON)
+option(NGP_BUILD_WITH_OPTIX "Build with OptiX to enable hardware ray tracing?" ON)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 set(CMAKE_VERBOSE_MAKEFILE ON)
@@ -35,7 +37,7 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 	set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo")
 endif()
 
-if (NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/glfw")
+if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/glfw/CMakeLists.txt")
 	message(FATAL_ERROR
 		"Some instant-ngp dependencies are missing. "
 		"If you forgot the \"--recursive\" flag when cloning this project, "
@@ -65,6 +67,7 @@ set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 set(CUDA_LINK_LIBRARIES_KEYWORD PUBLIC)
+set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
 
 if (MSVC)
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-bigobj")
@@ -73,33 +76,60 @@ else()
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-Wno-float-conversion")
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-fno-strict-aliasing")
 	list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=-fPIC")
-	set(CUDA_TOOLKIT_ROOT_DIR /opt/cuda/targets/x86_64-linux)
 endif()
 list(APPEND CUDA_NVCC_FLAGS "--extended-lambda")
 list(APPEND CUDA_NVCC_FLAGS "--expt-relaxed-constexpr")
 
 ###############################################################################
-# Dependencies (ordered alphabetically)
+# Dependencies
 ###############################################################################
 
-include_directories("dependencies")
+set(TCNN_BUILD_BENCHMARK OFF)
+set(TCNN_BUILD_EXAMPLES OFF)
+add_subdirectory(dependencies/tiny-cuda-nn)
 
-#########
-# Eigen #
-#########
-include_directories("dependencies/eigen")
-include_directories("dependencies/filesystem")
+set(CMAKE_CUDA_ARCHITECTURES ${TCNN_CUDA_ARCHITECTURES})
 
 if (NGP_BUILD_WITH_GUI)
-	########
-	# GLFW #
-	########
+	find_package(Vulkan)
+	if (Vulkan_FOUND AND NGP_BUILD_WITH_VULKAN)
+		set(NGP_VULKAN ON)
+		list(APPEND NGP_DEFINITIONS -DNGP_VULKAN -DGLFW_INCLUDE_VULKAN)
+		list(APPEND NGP_INCLUDE_DIRECTORIES "${Vulkan_INCLUDE_DIRS}")
+		set(NGP_LIBRARIES ${NGP_LIBRARIES} ${Vulkan_LIBRARIES})
+
+		list(APPEND GUI_SOURCES src/dlss.cu)
+
+		# DLSS depends on vulkan, so appears here
+		list(APPEND NGP_INCLUDE_DIRECTORIES "dependencies/dlss/include")
+		if (MSVC)
+			list(APPEND NGP_LINK_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dlss/lib/Windows_x86_64/x86_64")
+			if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+				set(NGP_LIBRARIES ${NGP_LIBRARIES} nvsdk_ngx_d_dbg)
+			else()
+				set(NGP_LIBRARIES ${NGP_LIBRARIES} nvsdk_ngx_d)
+			endif()
+		else()
+			list(APPEND NGP_LINK_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dlss/lib/Linux_x86_64")
+			set(NGP_LIBRARIES ${NGP_LIBRARIES} nvsdk_ngx)
+		endif()
+	else()
+		set(NGP_VULKAN OFF)
+		if (NGP_BUILD_WITH_VULKAN)
+			message(WARNING
+				"Vulkan was not found. Neural graphics primitives will still compile "
+				"and run correctly, but DLSS will not be supported."
+			)
+		endif()
+	endif()
+
 	set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL " " FORCE)
 	set(GLFW_BUILD_TESTS OFF CACHE BOOL " " FORCE)
 	set(GLFW_BUILD_DOCS OFF CACHE BOOL " " FORCE)
 	set(GLFW_BUILD_INSTALL OFF CACHE BOOL " " FORCE)
 	set(GLFW_INSTALL OFF CACHE BOOL " " FORCE)
 	set(GLFW_USE_CHDIR OFF CACHE BOOL " " FORCE)
+	set(GLFW_VULKAN_STATIC OFF CACHE BOOL " " FORCE)
 	set(BUILD_SHARED_LIBS ON CACHE BOOL " " FORCE)
 
 	add_subdirectory(dependencies/glfw)
@@ -113,25 +143,19 @@ if (NGP_BUILD_WITH_GUI)
 		BUILD_SHARED_LIBS USE_MSVC_RUNTIME_LIBRARY_DLL
 	)
 
-	include_directories("dependencies/glfw/include")
-	include_directories("dependencies/imgui")
+	list(APPEND NGP_INCLUDE_DIRECTORIES "dependencies/glfw/include" "dependencies/imgui")
 
-	#############
-	# GL3W/GLEW #
-	#############
 	if (MSVC)
-		include_directories("dependencies/gl3w")
-		link_directories("dependencies")
-		set(GL_SOURCES "dependencies/gl3w/GL/gl3w.c")
-		set(GL_LIBRARIES opengl32 $<TARGET_OBJECTS:glfw_objects>)
+		list(APPEND NGP_INCLUDE_DIRECTORIES "dependencies/gl3w")
+		list(APPEND GUI_SOURCES "dependencies/gl3w/GL/gl3w.c")
+		set(NGP_LIBRARIES ${NGP_LIBRARIES} opengl32 $<TARGET_OBJECTS:glfw_objects>)
 	else()
 		find_package(GLEW REQUIRED)
-		include_directories(${GLEW_INCLUDE_DIRS})
-		set(GL_LIBRARIES GL ${GLEW_LIBRARIES} $<TARGET_OBJECTS:glfw_objects>)
+		list(APPEND NGP_INCLUDE_DIRECTORIES ${GLEW_INCLUDE_DIRS})
+		set(NGP_LIBRARIES ${NGP_LIBRARIES} GL ${GLEW_LIBRARIES} $<TARGET_OBJECTS:glfw_objects> ${CMAKE_DL_LIBS})
 	endif()
 
-	set(GL_SOURCES
-		${GL_SOURCES}
+	list(APPEND GUI_SOURCES
 		dependencies/imguizmo/ImGuizmo.cpp
 		dependencies/imgui/imgui.cpp
 		dependencies/imgui/backends/imgui_impl_glfw.cpp
@@ -144,58 +168,42 @@ if (NGP_BUILD_WITH_GUI)
 	list(APPEND NGP_DEFINITIONS -DNGP_GUI)
 endif(NGP_BUILD_WITH_GUI)
 
-###########
-# nanovdb #
-###########
-include_directories("dependencies/nanovdb")
+list(APPEND NGP_INCLUDE_DIRECTORIES
+	"dependencies"
+	"dependencies/eigen"
+	"dependencies/filesystem"
+	"dependencies/nanovdb"
+	"dependencies/tinylogger"
+)
 
-##########
-# OpenMP #
-##########
 find_package(OpenMP)
 if (OPENMP_FOUND)
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 endif()
 
-#########
-# OPTIX #
-#########
 find_package(OptiX)
 # set OptiX_INSTALL_DIR via your environment if it's not found automatically
 
-if (OptiX_FOUND OR OptiX_INCLUDE)
-	include_directories("${OptiX_INCLUDE}")
+if ((OptiX_FOUND OR OptiX_INCLUDE) AND NGP_BUILD_WITH_OPTIX)
+	set(NGP_OPTIX ON)
+	list(APPEND NGP_INCLUDE_DIRECTORIES "${OptiX_INCLUDE}")
 	list(APPEND NGP_DEFINITIONS -DNGP_OPTIX)
 else()
-	message(WARNING
-		"OptiX was not found. Neural graphics primitives will still compile "
-		"and run correctly. However, SDF training in 'raystab' and 'pathescape' "
-		"modes will be significantly slower."
-	)
+	set(NGP_OPTIX OFF)
+	if (NGP_BUILD_WITH_OPTIX)
+		message(WARNING
+			"OptiX was not found. Neural graphics primitives will still compile "
+			"and run correctly. However, SDF training in 'raystab' and 'pathescape' "
+			"modes will be significantly slower."
+		)
+	endif()
 endif()
 
-##########
-# Python #
-##########
 find_package(Python 3.7 COMPONENTS Interpreter Development)
 if (Python_FOUND)
 	add_subdirectory("dependencies/pybind11")
 endif()
-
-################
-# tiny-cuda-nn #
-################
-set(TCNN_BUILD_BENCHMARK OFF)
-set(TCNN_BUILD_EXAMPLES OFF)
-add_subdirectory(dependencies/tiny-cuda-nn)
-include_directories("dependencies/tiny-cuda-nn/include")
-include_directories("dependencies/tiny-cuda-nn/dependencies")
-
-##############
-# tinylogger #
-##############
-include_directories("dependencies/tinylogger")
 
 
 ###############################################################################
@@ -203,11 +211,9 @@ include_directories("dependencies/tinylogger")
 ###############################################################################
 
 list(APPEND NGP_DEFINITIONS -DNGP_VERSION="${NGP_VERSION}")
-
-include_directories("include")
-
-set(SOURCES
-	${GL_SOURCES}
+list(APPEND NGP_INCLUDE_DIRECTORIES "include")
+list(APPEND NGP_SOURCES
+	${GUI_SOURCES}
 	src/camera_path.cu
 	src/common_device.cu
 	src/marching_cubes.cu
@@ -232,21 +238,23 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR})
 
 get_filename_component(CUDA_COMPILER_BIN "${CMAKE_CUDA_COMPILER}" DIRECTORY)
 
-if (OptiX_FOUND OR OptiX_INCLUDE)
+if (NGP_OPTIX)
 	add_library(optix_program OBJECT
 		src/optix/pathescape.cu
 		src/optix/raystab.cu
 		src/optix/raytrace.cu
 	)
 
-	set_target_properties(optix_program PROPERTIES CUDA_PTX_COMPILATION ON)
-	set_target_properties(optix_program PROPERTIES CUDA_ARCHITECTURES OFF)
+	set_target_properties(optix_program PROPERTIES CUDA_PTX_COMPILATION ON CUDA_ARCHITECTURES OFF)
 	target_compile_definitions(optix_program PUBLIC ${NGP_DEFINITIONS} -DTCNN_MIN_GPU_ARCH=0)
 	target_compile_options(optix_program PUBLIC "--expt-relaxed-constexpr")
 
+	get_target_property(TCNN_INCLUDE_DIRECTORIES tiny-cuda-nn INCLUDE_DIRECTORIES)
+	target_include_directories(optix_program PUBLIC ${NGP_INCLUDE_DIRECTORIES} ${TCNN_INCLUDE_DIRECTORIES})
+
 	# OptiX programs will be compiled as PTX and packaged
 	# as headers to be included from the binary dir.
-	include_directories("${CMAKE_CURRENT_BINARY_DIR}")
+	list(APPEND NGP_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}")
 	set(OPTIX_PTX_HEADER ${CMAKE_CURRENT_BINARY_DIR}/optix_ptx.h)
 
 	find_program(bin_to_c NAMES bin2c PATHS ${CUDA_COMPILER_BIN})
@@ -270,36 +278,56 @@ if (OptiX_FOUND OR OptiX_INCLUDE)
 		COMMENT "Converting PTX files to a C header"
 	)
 
-	list(APPEND SOURCES ${OPTIX_PTX_HEADER})
+	list(APPEND NGP_SOURCES ${OPTIX_PTX_HEADER})
 endif()
 
-add_library(ngp STATIC ${SOURCES})
-set_target_properties(ngp PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
-set_target_properties(ngp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-target_link_libraries(ngp PUBLIC ${GL_LIBRARIES} tiny-cuda-nn)
-target_compile_options(ngp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
-target_compile_definitions(ngp PUBLIC ${NGP_DEFINITIONS} ${TCNN_DEFINITIONS})
+add_library(ngp STATIC ${NGP_SOURCES})
+set_target_properties(ngp PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON CUDA_SEPARABLE_COMPILATION ON)
+target_compile_definitions(ngp PUBLIC ${NGP_DEFINITIONS})
+target_compile_options(ngp PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+target_include_directories(ngp PUBLIC ${NGP_INCLUDE_DIRECTORIES})
+target_link_directories(ngp PUBLIC ${NGP_LINK_DIRECTORIES})
+target_link_libraries(ngp PUBLIC ${NGP_LIBRARIES} tiny-cuda-nn)
 
 add_executable(testbed src/main.cu)
-target_link_libraries(testbed PUBLIC ngp)
-target_compile_options(testbed PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
-target_compile_definitions(testbed PUBLIC ${NGP_DEFINITIONS} ${TCNN_DEFINITIONS})
+target_link_libraries(testbed PRIVATE ngp)
+
+# Copy DLSS shared libraries
+if (NGP_VULKAN)
+	if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+		set(NGX_BUILD_DIR "dev")
+	else()
+		set(NGX_BUILD_DIR "rel")
+	endif()
+
+	if (MSVC)
+		add_custom_command(TARGET testbed POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dlss/lib/Windows_x86_64/${NGX_BUILD_DIR}/nvngx_dlss.dll" $<TARGET_FILE_DIR:testbed>
+			COMMAND_EXPAND_LISTS
+		)
+	else()
+		file(GLOB DLSS_SOS "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dlss/lib/Linux_x86_64/${NGX_BUILD_DIR}/libnvidia-ngx-dlss.so.*")
+		add_custom_command(TARGET testbed POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy ${DLSS_SOS} $<TARGET_FILE_DIR:testbed>
+			COMMAND_EXPAND_LISTS
+		)
+	endif()
+endif()
+
 
 if (Python_FOUND)
 	add_library(pyngp SHARED src/python_api.cu)
-	set_target_properties(pyngp PROPERTIES CXX_VISIBILITY_PRESET "hidden")
-	set_target_properties(pyngp PROPERTIES CUDA_VISIBILITY_PRESET "hidden")
-	target_link_libraries(pyngp PUBLIC ngp ${PYTHON_LIBRARIES} pybind11::module)
-	target_compile_options(pyngp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
-	target_compile_definitions(pyngp PUBLIC -DNGP_PYTHON ${NGP_DEFINITIONS} ${TCNN_DEFINITIONS})
+	set_target_properties(pyngp PROPERTIES CXX_VISIBILITY_PRESET "hidden" CUDA_VISIBILITY_PRESET "hidden")
+	target_link_libraries(pyngp PRIVATE ngp PUBLIC ${PYTHON_LIBRARIES} pybind11::module)
+	target_compile_definitions(pyngp PUBLIC -DNGP_PYTHON)
 	pybind11_extension(pyngp)
 
 	if (MSVC)
 		# Copy dlls needed at runtime
-		file(GLOB CUBLAS_DLLS "${CUDA_COMPILER_BIN}/cublas*.dll")
-		if (CUBLAS_DLLS)
+		file(GLOB CUDA_DLLS "${CUDA_COMPILER_BIN}/cublas*.dll" "${CUDA_COMPILER_BIN}/cudart64*.dll" "${CUDA_COMPILER_BIN}/cusolver64*.dll")
+		if (CUDA_DLLS)
 			add_custom_command(TARGET pyngp POST_BUILD
-				COMMAND ${CMAKE_COMMAND} -E copy ${CUBLAS_DLLS} $<TARGET_FILE_DIR:pyngp>
+				COMMAND ${CMAKE_COMMAND} -E copy ${CUDA_DLLS} $<TARGET_FILE_DIR:pyngp>
 				COMMAND_EXPAND_LISTS
 			)
 		endif()

@@ -24,7 +24,7 @@ using namespace args;
 using namespace ngp;
 using namespace std;
 using namespace tcnn;
-namespace fs = filesystem;
+namespace fs = ::filesystem;
 
 int main(int argc, char** argv) {
 	ArgumentParser parser{
@@ -141,7 +141,7 @@ int main(int argc, char** argv) {
 
 			if (scene_path.is_directory() || equals_case_insensitive(scene_path.extension(), "json")) {
 				mode = ETestbedMode::Nerf;
-			} else if (equals_case_insensitive(scene_path.extension(), "obj")) {
+			} else if (equals_case_insensitive(scene_path.extension(), "obj") || equals_case_insensitive(scene_path.extension(), "stl")) {
 				mode = ETestbedMode::Sdf;
 			} else if (equals_case_insensitive(scene_path.extension(), "nvdb")) {
 				mode = ETestbedMode::Volume;
@@ -228,7 +228,7 @@ int main(int argc, char** argv) {
 		// Render/training loop
 		while (testbed.frame()) {
 			if (!gui) {
-				tlog::info() << "iteration=" << testbed.m_training_step << " loss=" << testbed.m_loss_scalar;
+				tlog::info() << "iteration=" << testbed.m_training_step << " loss=" << testbed.m_loss_scalar.val();
 			}
 		}
 	} catch (const exception& e) {

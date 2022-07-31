@@ -12,15 +12,15 @@
  *  @author Thomas Müller & Alex Evans, NVIDIA
  */
 
-#include <neural-graphics-primitives/common.h>
 #include <neural-graphics-primitives/common_device.cuh>
-#include <neural-graphics-primitives/render_buffer.h>
+#include <neural-graphics-primitives/common.h>
 #include <neural-graphics-primitives/random_val.cuh>
+#include <neural-graphics-primitives/render_buffer.h>
 #include <neural-graphics-primitives/testbed.h>
 
 #include <tiny-cuda-nn/gpu_matrix.h>
-#include <tiny-cuda-nn/network.h>
 #include <tiny-cuda-nn/network_with_input_encoding.h>
+#include <tiny-cuda-nn/network.h>
 #include <tiny-cuda-nn/trainer.h>
 
 #include <fstream>
@@ -36,20 +36,6 @@ Testbed::NetworkDims Testbed::network_dims_image() const {
 	dims.n_output = 3;
 	dims.n_pos = 2;
 	return dims;
-}
-
-template <uint32_t base>
-__host__ __device__ float halton(size_t idx) {
-	float f = 1;
-	float result = 0;
-
-	while (idx > 0) {
-		f /= base;
-		result += f * (idx % base);
-		idx /= base;
-	}
-
-	return result;
 }
 
 __global__ void halton23_kernel(uint32_t n_elements, size_t base_idx, Vector2f* __restrict__ output) {
@@ -89,7 +75,16 @@ __global__ void stratify2_kernel(uint32_t n_elements, uint32_t log2_batch_size, 
 	inout[i] = {val.x() / size + ((float)x/size), val.y() / size + ((float)y/size)};
 }
 
-__global__ void init_image_coords(Vector2f* __restrict__ positions, Vector2i resolution, Vector2i image_resolution, float view_dist, Vector2f image_pos, Vector2f screen_center, bool snap_to_pixel_centers, uint32_t spp) {
+__global__ void init_image_coords(
+	Vector2f* __restrict__ positions,
+	Vector2i resolution,
+	Vector2i image_resolution,
+	float view_dist,
+	Vector2f image_pos,
+	Vector2f screen_center,
+	bool snap_to_pixel_centers,
+	uint32_t sample_index
+) {
 	uint32_t x = threadIdx.x + blockDim.x * blockIdx.x;
 	uint32_t y = threadIdx.y + blockDim.y * blockIdx.y;
 
@@ -97,21 +92,18 @@ __global__ void init_image_coords(Vector2f* __restrict__ positions, Vector2i res
 		return;
 	}
 
-	Vector2f jit = ld_random_pixel_offset(snap_to_pixel_centers ? 0 : spp, x, y);
-	Vector2f offset = screen_center.cwiseProduct(resolution.cast<float>()) + jit;
-
-	float y_scale = view_dist;
-	float x_scale = y_scale * resolution.x() / resolution.y();
-
-	Vector2f uv = {
-		((x_scale * (x + offset.x())) / resolution.x() - view_dist * image_pos.x()) / image_resolution.x() * image_resolution.y(),
-		(y_scale * (y + offset.y())) / resolution.y() - view_dist * image_pos.y()
-	};
-
 	uint32_t idx = x + resolution.x() * y;
-	positions[idx] = uv;
+	positions[idx] = pixel_to_image_uv(
+		sample_index,
+		{x, y},
+		resolution,
+		image_resolution,
+		screen_center,
+		view_dist,
+		image_pos,
+		snap_to_pixel_centers
+	);
 }
-
 
 // #define COLOR_SPACE_CONVERT convert to ycrcb experiment - causes some color shift tho it does lead to very slightly sharper edges. not a net win if you like colors :)
 #define CHROMA_SCALE 0.2f
@@ -142,7 +134,7 @@ __global__ void colorspace_convert_image_float(Vector2i resolution, const char* 
 	((float4*)texture)[y * resolution.x() + x] = *(float4*)&val[0];
 }
 
-__global__ void shade_kernel_image(Vector2i resolution, const Vector2f* __restrict__ positions, const Array3f* __restrict__ colors, Array4f* __restrict__ frame_buffer, bool linear_colors) {
+__global__ void shade_kernel_image(Vector2i resolution, const Vector2f* __restrict__ positions, const Array3f* __restrict__ colors, Array4f* __restrict__ frame_buffer, float* __restrict__ depth_buffer, bool linear_colors) {
 	uint32_t x = threadIdx.x + blockDim.x * blockIdx.x;
 	uint32_t y = threadIdx.y + blockDim.y * blockIdx.y;
 
@@ -155,6 +147,7 @@ __global__ void shade_kernel_image(Vector2i resolution, const Vector2f* __restri
 	const Vector2f uv = positions[idx];
 	if (uv.x() < 0.0f || uv.x() > 1.0f || uv.y() < 0.0f || uv.y() > 1.0f) {
 		frame_buffer[idx] = Array4f::Zero();
+		depth_buffer[idx] = 1e10f;
 		return;
 	}
 
@@ -173,6 +166,7 @@ __global__ void shade_kernel_image(Vector2i resolution, const Vector2f* __restri
 #else
 	frame_buffer[idx] = {color.x(), color.y(), color.z(), 1.0f};
 #endif
+	depth_buffer[idx] = 1.0f;
 }
 
 template <typename T, uint32_t stride>
@@ -223,19 +217,16 @@ __global__ void eval_image_kernel_and_snap(uint32_t n_elements, const T* __restr
 	}
 }
 
-void Testbed::train_image(size_t target_batch_size, size_t n_steps, cudaStream_t stream) {
+void Testbed::train_image(size_t target_batch_size, bool get_loss_scalar, cudaStream_t stream) {
 	const uint32_t n_output_dims = 3;
 	const uint32_t n_input_dims = 2;
 
 	// Auxiliary matrices for training
 	const uint32_t batch_size = (uint32_t)target_batch_size;
-	const uint32_t n_batches = (uint32_t)n_steps;
-
-	const uint32_t GRAPH_SIZE = (uint32_t)std::min((size_t)16, n_steps);
 
 	// Permute all training records to de-correlate training data
 
-	const uint32_t n_elements = batch_size * n_batches;
+	const uint32_t n_elements = batch_size;
 	m_image.training.positions.enlarge(n_elements);
 	m_image.training.targets.enlarge(n_elements);
 
@@ -279,33 +270,19 @@ void Testbed::train_image(size_t target_batch_size, size_t n_steps, cudaStream_t
 		);
 	}
 
+	GPUMatrix<float> training_batch_matrix((float*)(m_image.training.positions.data()), n_input_dims, batch_size);
+	GPUMatrix<float> training_target_matrix((float*)(m_image.training.targets.data()), n_output_dims, batch_size);
 
-	float total_loss = 0;
-	uint32_t n_loss_samples = 0;
+	auto ctx = m_trainer->training_step(stream, training_batch_matrix, training_target_matrix);
+	m_training_step++;
 
-	for (size_t i = 0; i < n_steps; i += GRAPH_SIZE) {
-		for (uint32_t j = 0; j < GRAPH_SIZE; ++j) {
-			uint32_t training_offset = (uint32_t)((i+j) % n_batches) * batch_size;
-
-			GPUMatrix<float> training_batch_matrix((float*)(m_image.training.positions.data()+training_offset), n_input_dims, batch_size);
-			GPUMatrix<float> training_target_matrix((float*)(m_image.training.targets.data()+training_offset), n_output_dims, batch_size);
-
-			auto ctx = m_trainer->training_step(stream, training_batch_matrix, training_target_matrix);
-			if (j == (GRAPH_SIZE - 1)) {
-				total_loss += m_trainer->loss(stream, *ctx);
-				++n_loss_samples;
-			}
-
-			m_training_step++;
-		}
+	if (get_loss_scalar) {
+		m_loss_scalar.update(m_trainer->loss(stream, *ctx));
 	}
-
-	m_loss_scalar = total_loss / (float)n_loss_samples;
-	update_loss_graph();
 }
 
 void Testbed::render_image(CudaRenderBuffer& render_buffer, cudaStream_t stream) {
-	auto res = render_buffer.resolution();
+	auto res = render_buffer.in_resolution();
 
 	// Make sure we have enough memory reserved to render at the requested resolution
 	size_t n_pixels = (size_t)res.x() * res.y();
@@ -368,6 +345,7 @@ void Testbed::render_image(CudaRenderBuffer& render_buffer, cudaStream_t stream)
 		m_image.render_coords.data(),
 		m_image.render_out.data(),
 		render_buffer.frame_buffer(),
+		render_buffer.depth_buffer(),
 		m_image.training.linear_colors
 	);
 }
@@ -440,43 +418,6 @@ void Testbed::load_binary_image() {
 	size_t n_pixels = (size_t)m_image.resolution.x() * m_image.resolution.y();
 	m_image.data.resize(n_pixels * 4 * sizeof(__half));
 
-	// Can directly copy to GPU memory!
-	// TODO: uncomment once GDS works everywhere
-	// {
-	// 	int fd = open(m_data_path.string().c_str(), O_DIRECT);
-
-	// 	CUfileError_t status;
-	// 	CUfileDescr_t cf_descr;
-	// 	CUfileHandle_t cf_handle;
-	// 	memset((void *)&cf_descr, 0, sizeof(CUfileDescr_t));
-	// 	cf_descr.handle.fd = fd;
-	// 	cf_descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-	// 	status = cuFileHandleRegister(&cf_handle, &cf_descr);
-	// 	if (status.err != CU_FILE_SUCCESS) {
-	// 		close(fd);
-	// 		throw std::runtime_error{std::string{"cuFileHandleRegister fd "} + std::to_string(fd) + " status " + status.err};
-	// 	}
-
-	// 	status = cuFileBufRegister(m_image.data.data(), m_image.data.get_bytes(), 0);
-	// 	if (status.err != CU_FILE_SUCCESS) {
-	// 		cuFileHandleDeregister(cf_handle);
-	// 		close(fd);
-	// 		throw std::runtime_error{std::string{"buffer registration failed "} + status.err};
-	// 	}
-
-	// 	cuFileRead(cf_handle, m_image.data.data(), m_image.data.get_bytes(), 2 * sizeof(int), 0);
-
-	// 	status = cuFileBufDeregister(devPtr_base);
-	// 	if (status.err != CU_FILE_SUCCESS) {
-	// 		cuFileHandleDeregister(cf_handle);
-	// 		close(fd);
-	// 		throw std::runtime_error{std::string{"buffer deregistration failed "} + status.err};
-	// 	}
-
-	// 	cuFileHandleDeregister(cf_handle);
-	// 	close(fd);
-	// }
-
 	std::vector<__half> image(n_pixels * 4);
 	f.read(reinterpret_cast<char*>(image.data()), sizeof(__half) * image.size());
 	CUDA_CHECK_THROW(cudaMemcpy(m_image.data.data(), image.data(), image.size() * sizeof(__half), cudaMemcpyHostToDevice));
@@ -495,15 +436,20 @@ __global__ void image_coords_from_idx(const uint32_t n_elements, uint32_t offset
 	pos[i] = (Vector2i{x, y}.cwiseMax(0).cwiseMin(resolution - Vector2i::Ones()).cast<float>() + Vector2f::Constant(0.5f)).cwiseQuotient(resolution.cast<float>());
 }
 
-__global__ void image_mse_kernel(const uint32_t n_elements, const Array3f* __restrict__ target, const Array3f* __restrict__ prediction, float* __restrict__ result) {
+__global__ void image_mse_kernel(const uint32_t n_elements, const Array3f* __restrict__ target, const Array3f* __restrict__ prediction, float* __restrict__ result, bool quantize_to_byte) {
 	uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i >= n_elements) return;
 
-	const Array3f diff = target[i] - prediction[i];
+	Array3f pred = prediction[i];
+	if (quantize_to_byte) {
+		pred = (pred * 255.0f + Array3f::Constant(0.5f)).cast<int>().cwiseMax(0).cwiseMin(255).cast<float>() / 255.0f;
+	}
+
+	const Array3f diff = target[i] - pred;
 	result[i] = (diff * diff).mean();
 }
 
-float Testbed::compute_image_mse() {
+float Testbed::compute_image_mse(bool quantize_to_byte) {
 	const uint32_t n_output_dims = 3;
 	const uint32_t n_input_dims = 2;
 
@@ -559,7 +505,8 @@ float Testbed::compute_image_mse() {
 			batch_size,
 			targets.data(),
 			predictions.data(),
-			se.data() + offset
+			se.data() + offset,
+			quantize_to_byte
 		);
 	}
 
